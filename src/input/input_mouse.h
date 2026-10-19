@@ -23,6 +23,15 @@ void SetMouseGyroRollMode(bool mode);
 void EmulateJoystick(GameController* controller, u32 interval);
 void EmulateGyro(GameController* controller, u32 interval);
 
+// Controller "sensor mode" (for pads without a gyro), modelled on the iss_pc native port:
+//   L3+R3 together toggles it. While on, the pad is reported held sideways (spray can),
+//   cross shakes, and the left stick aims. Those inputs are not sent to the game.
+bool IsSensorModeOn();
+void SensorModeStickButton(bool is_left, bool pressed);
+void SetSensorShake(bool shake);
+void SetSensorAim(bool is_x, float value); // value in -1..1
+void EmulateSensorMode(GameController* controller, u32 interval);
+
 void ApplyMouseInputBlockers();
 
 // Polls the mouse for changes

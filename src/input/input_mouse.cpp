@@ -1,9 +1,11 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <cmath>
 
 #include "common/assert.h"
+#include "common/logging/log.h"
 #include "common/types.h"
 #include "input/controller.h"
 #include "input/input_handler.h"
@@ -86,16 +88,113 @@ void EmulateJoystick(GameController* controller, u32 interval) {
 }
 
 constexpr float constant_down_accel[3] = {0.0f, 9.81f, 0.0f};
+
+// Keyboard motion emulation, active while the mouse-to-gyro mode (hotkey_toggle_mouse_to_gyro,
+// F6 by default) is on. It simulates what inFAMOUS Second Son asks for in graffiti scenes:
+//   T / G : hold the controller sideways (one side / the other), like a spray can
+//   Y     : shake the controller
+// If the picture is turned the wrong way in-game, swap T and G or flip kSidewaysSign.
+constexpr float kSidewaysSign = 1.0f;
+constexpr float kSidewaysAngle = 1.5707963f; // 90 degrees
+constexpr float kShakeAccel = 25.0f;         // m/s^2 peak while shaking
+constexpr float kShakeHz = 5.0f;             // shakes per second
+
 void EmulateGyro(GameController* controller, u32 interval) {
     float d_x = 0, d_y = 0;
     SDL_GetRelativeMouseState(&d_x, &d_y);
-    controller->UpdateAcceleration(constant_down_accel);
+
+    const bool* keys = SDL_GetKeyboardState(nullptr);
+    const bool side_left = keys && keys[SDL_SCANCODE_T];
+    const bool side_right = keys && keys[SDL_SCANCODE_G];
+    const bool shake = keys && keys[SDL_SCANCODE_Y];
+
+    float accel[3] = {constant_down_accel[0], constant_down_accel[1], constant_down_accel[2]};
+
+    if (side_left || side_right) {
+        // Roll the controller 90 degrees around the Z axis, with gravity following it.
+        const float sign = (side_left ? 1.0f : -1.0f) * kSidewaysSign;
+        const float half = sign * kSidewaysAngle * 0.5f;
+        controller->SetOrientationOverride({0.0f, 0.0f, std::sin(half), std::cos(half)});
+        accel[0] = sign * 9.81f;
+        accel[1] = 0.0f;
+    } else {
+        controller->ClearOrientationOverride();
+    }
+
+    if (shake) {
+        // Fast back-and-forth push along the can's long axis while Y is held.
+        const float t = static_cast<float>(SDL_GetTicks()) * 0.001f;
+        const float wave = std::sin(t * kShakeHz * 2.0f * 3.14159265f);
+        if (side_left || side_right) {
+            accel[1] += wave * kShakeAccel;
+        } else {
+            accel[0] += wave * kShakeAccel;
+        }
+    }
+    controller->UpdateAcceleration(accel);
+
     float gyro_from_mouse[3] = {-d_y / 100, -d_x / 100, 0.0f};
     if (mouse_gyro_roll_mode) {
         gyro_from_mouse[1] = 0.0f;
         gyro_from_mouse[2] = -d_x / 100;
     }
     controller->UpdateGyro(gyro_from_mouse);
+}
+
+// ---- Controller sensor mode ------------------------------------------------------------
+// Tunables. If the cursor moves the wrong way in-game, flip kAimSignX / kAimSignY.
+constexpr float kAimGain = 4.0f;  // rad/s of simulated rotation at full stick
+constexpr float kAimSignX = 1.0f;
+constexpr float kAimSignY = 1.0f;
+constexpr float kSensorDeadzone = 0.10f;
+
+static bool sensor_mode = false;
+static bool sensor_l3 = false, sensor_r3 = false;
+static bool sensor_shake = false;
+static float sensor_aim_x = 0.0f, sensor_aim_y = 0.0f;
+
+bool IsSensorModeOn() {
+    return sensor_mode;
+}
+
+void SensorModeStickButton(bool is_left, bool pressed) {
+    const bool both_before = sensor_l3 && sensor_r3;
+    (is_left ? sensor_l3 : sensor_r3) = pressed;
+    if (!both_before && sensor_l3 && sensor_r3) {
+        sensor_mode = !sensor_mode;
+        sensor_shake = false;
+        sensor_aim_x = sensor_aim_y = 0.0f;
+        LOG_INFO(Input, "Sensor mode {}", sensor_mode ? "ON (cross shakes, left stick aims)" : "OFF");
+    }
+}
+
+void SetSensorShake(bool shake) {
+    sensor_shake = shake;
+}
+
+void SetSensorAim(bool is_x, float value) {
+    if (std::abs(value) < kSensorDeadzone) {
+        value = 0.0f;
+    }
+    (is_x ? sensor_aim_x : sensor_aim_y) = std::clamp(value, -1.0f, 1.0f);
+}
+
+void EmulateSensorMode(GameController* controller, u32 interval) {
+    // Hold the pad sideways, like the spray can the graffiti asks for.
+    const float half = 1.5707963f * 0.5f;
+    controller->SetOrientationOverride({0.0f, 0.0f, std::sin(half), std::cos(half)});
+
+    float accel[3] = {9.81f, 0.0f, 0.0f};
+    if (sensor_shake) {
+        const float t = static_cast<float>(SDL_GetTicks()) * 0.001f;
+        accel[1] += std::sin(t * 5.0f * 2.0f * 3.14159265f) * 25.0f;
+    }
+    controller->UpdateAcceleration(accel);
+
+    // The left stick turns the can: while it is held the cursor keeps moving that way.
+    const float gyro[3] = {-sensor_aim_y * kAimGain * kAimSignY,
+                           -sensor_aim_x * kAimGain * kAimSignX, 0.0f};
+    controller->UpdateGyro(gyro);
 }
 
 void EmulateTouchpad(GameController* controller, u32 interval) {
@@ -125,6 +224,23 @@ void ApplyMouseInputBlockers() {
 
 Uint32 MousePolling(void* param, Uint32 id, Uint32 interval) {
     auto* controller = (GameController*)param;
+    static bool was_sensor_mode = false;
+    if (sensor_mode) {
+        was_sensor_mode = true;
+        EmulateSensorMode(controller, interval);
+        return interval;
+    }
+    if (was_sensor_mode) {
+        // Sensor mode just turned off: put the simulated motion back to rest.
+        was_sensor_mode = false;
+        const float no_rotation[3] = {0.0f, 0.0f, 0.0f};
+        controller->UpdateGyro(no_rotation);
+        controller->UpdateAcceleration(constant_down_accel);
+    }
+    if (mouse_mode != MouseMode::Gyro) {
+        // Leaving gyro mode: stop forcing the simulated "sideways" orientation.
+        controller->ClearOrientationOverride();
+    }
     switch (mouse_mode) {
     case MouseMode::Joystick:
         EmulateJoystick(controller, interval);

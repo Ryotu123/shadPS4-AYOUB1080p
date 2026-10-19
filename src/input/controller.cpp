@@ -122,6 +122,20 @@ void GameController::PollState() {
     PushStateLocked();
 }
 
+void GameController::SetOrientationOverride(const Libraries::Pad::OrbisFQuaternion& q) {
+    std::lock_guard lock{m_state_mutex};
+    m_orientation_override = q;
+}
+
+void GameController::ClearOrientationOverride() {
+    std::lock_guard lock{m_state_mutex};
+    if (m_orientation_override.has_value()) {
+        m_orientation_override.reset();
+        m_state.orientation = {0.0f, 0.0f, 0.0f, 1.0f};
+        m_last_orientation_update = 0;
+    }
+}
+
 void GameController::ResetOrientation() {
     std::lock_guard lock{m_state_mutex};
     m_state.orientation = {0.0f, 0.0f, 0.0f, 1.0f};
@@ -189,6 +203,11 @@ void GameController::DisconnectController() {
 }
 
 void GameController::UpdateOrientationLocked(u64 timestamp) {
+    if (m_orientation_override.has_value()) {
+        m_state.orientation = *m_orientation_override;
+        m_last_orientation_update = timestamp;
+        return;
+    }
     if (m_last_orientation_update == 0 || timestamp <= m_last_orientation_update) {
         m_last_orientation_update = timestamp;
         return;

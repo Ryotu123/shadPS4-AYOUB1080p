@@ -823,6 +823,26 @@ void ControllerOutput::FinalizeUpdate(u8 gamepad_index) {
         case MOUSE_GYRO_ROLL_MODE:
             SetMouseGyroRollMode(new_button_state);
             break;
+        case SDL_GAMEPAD_BUTTON_LEFT_STICK:
+        case SDL_GAMEPAD_BUTTON_RIGHT_STICK:
+            // L3+R3 together toggles the sensor mode; while it is on, L3/R3 stay out of the game
+            // (releases are always forwarded so nothing is left stuck).
+            SensorModeStickButton(button == SDL_GAMEPAD_BUTTON_LEFT_STICK, new_button_state);
+            if (!IsSensorModeOn() || !new_button_state) {
+                controller->Button(SDLGamepadToOrbisButton(button), new_button_state);
+            }
+            break;
+        case SDL_GAMEPAD_BUTTON_SOUTH:
+            if (IsSensorModeOn()) {
+                SetSensorShake(new_button_state); // cross shakes the spray can
+                if (!new_button_state) {
+                    controller->Button(SDLGamepadToOrbisButton(button), false);
+                }
+            } else {
+                SetSensorShake(false);
+                controller->Button(SDLGamepadToOrbisButton(button), new_button_state);
+            }
+            break;
         default: // is a normal key (hopefully)
             controller->Button(SDLGamepadToOrbisButton(button), new_button_state);
             break;
@@ -864,6 +884,12 @@ void ControllerOutput::FinalizeUpdate(u8 gamepad_index) {
             return;
         default:
             break;
+        }
+        if (IsSensorModeOn() && (c_axis == Axis::LeftX || c_axis == Axis::LeftY)) {
+            // Sensor mode: the left stick aims the spray can instead of moving Delsin.
+            SetSensorAim(c_axis == Axis::LeftX, static_cast<float>(*new_param) / 127.0f);
+            controller->Axis(c_axis, GetAxis(-0x80, 0x7f, 0));
+            return;
         }
         controller->Axis(c_axis, GetAxis(-0x80, 0x7f, *new_param * multiplier));
     }

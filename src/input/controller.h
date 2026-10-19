@@ -99,6 +99,9 @@ public:
     void UpdateAcceleration(const float acceleration[3]);
     void PollState();
     void ResetOrientation();
+    // Forces the reported orientation (used by the keyboard/mouse motion emulation).
+    void SetOrientationOverride(const Libraries::Pad::OrbisFQuaternion& q);
+    void ClearOrientationOverride();
     void SetLightBarRGB(u8 const r, u8 const g, u8 const b);
     void SetLightBarRGB(Colour const c);
     Colour GetLightBarRGB();
@@ -120,6 +123,8 @@ private:
     u64 m_last_orientation_update{};
     Colour colour;
     std::optional<Colour> override_colour{};
+
+    std::optional<Libraries::Pad::OrbisFQuaternion> m_orientation_override{};
 
     State m_state;
 
